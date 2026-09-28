@@ -8,11 +8,12 @@ st.title("📄 DocuMind: Semantic Document Search")
 
 @st.cache_resource
 def load_services():
-    return EmbeddingEngine(), EndeeStore()
+    with st.spinner("Loading AI embedding model & Endee database..."):
+        return EmbeddingEngine(), EndeeStore()
 
 embedder, db = load_services()
 
-# Sidebar: Document Processing
+# Sidebar: Document Upload & Indexing
 st.sidebar.header("1. Upload & Index")
 uploaded_file = st.sidebar.file_uploader("Upload a PDF document", type=["pdf"])
 
@@ -20,22 +21,24 @@ if uploaded_file and st.sidebar.button("Index Document"):
     reader = PdfReader(uploaded_file)
     raw_text = ""
     for page in reader.pages:
-        raw_text += page.extract_text() + "\n"
+        text = page.extract_text()
+        if text:
+            raw_text += text + "\n"
 
-    # Simple chunking logic (500 characters per chunk)
+    # Chunk text into 500-character segments
     chunks = [raw_text[i:i+500] for i in range(0, len(raw_text), 500) if raw_text[i:i+500].strip()]
     
-    # Generate embeddings
-    st.sidebar.info("Generating embeddings...")
-    embeddings = embedder.encode_texts(chunks)
-    
-    # Prepare IDs and Payloads
-    ids = [f"chunk_{i}" for i in range(len(chunks))]
-    payloads = [{"text": chunk, "source": uploaded_file.name} for chunk in chunks]
+    if chunks:
+        st.sidebar.info("Generating vector embeddings...")
+        embeddings = embedder.encode_texts(chunks)
+        
+        ids = [f"chunk_{i}" for i in range(len(chunks))]
+        payloads = [{"text": chunk, "source": uploaded_file.name} for chunk in chunks]
 
-    # Upsert into Endee
-    db.add_documents(ids, embeddings, payloads)
-    st.sidebar.success(f"Successfully indexed {len(chunks)} chunks into Endee!")
+        db.add_documents(ids, embeddings, payloads)
+        st.sidebar.success(f"Successfully indexed {len(chunks)} chunks into Endee!")
+    else:
+        st.sidebar.warning("No readable text found in PDF.")
 
 # Main Area: Querying
 st.header("2. Ask Questions")
@@ -46,6 +49,19 @@ if user_query:
     results = db.query_similar(query_vector, top_k=3)
 
     st.subheader("Top Context Match Results:")
-    for res in results:
-        with st.expander(f"Match Score / Payload ID: {getattr(res, 'id', 'Result')}"):
-            st.write(res.payload.get("text", "No text payload found"))
+    for item in results:
+        # Extract fields whether returned as dict or object
+        if isinstance(item, dict):
+            item_id = item.get("id", "Result")
+            score = item.get("score", item.get("distance", None))
+            meta = item.get("meta", item.get("payload", {}))
+        else:
+            item_id = getattr(item, "id", "Result")
+            score = getattr(item, "score", getattr(item, "distance", None))
+            meta = getattr(item, "meta", getattr(item, "payload", {}))
+
+        text_content = meta.get("text", str(meta)) if isinstance(meta, dict) else str(meta)
+        header_text = f"Match ID: {item_id}" + (f" (Score: {score:.4f})" if isinstance(score, (int, float)) else "")
+        
+        with st.expander(header_text):
+            st.write(text_content)
